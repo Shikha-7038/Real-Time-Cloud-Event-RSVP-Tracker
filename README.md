@@ -1,107 +1,247 @@
-# Real-Time Cloud-Based Event Planning & RSVP Tracker — Option B (Cloud-Ready)
+# Real-Time Cloud-Based Event Planning & RSVP Tracker
 
-This is the **Option B** build from the project brief: **React** frontend, **FastAPI** backend, a database layer that's a one-line swap to **Supabase Postgres**, and genuine **WebSocket** real-time updates (no polling). It reuses and hardens the same business logic proven out in the Option A (Flask/SQLite) build, now expressed with an ORM and true push updates.
+A web application where organizers create events and attendees RSVP as **Going**, **Maybe** or **Not Going**. RSVP counts update **instantly in every open browser** through WebSockets, event capacity is enforced even under simultaneous requests, and overflow attendees are placed on an automatic waitlist.
 
-> **On "Firebase/Supabase Auth" and a live Firestore/Supabase database:** those require *your own* cloud project credentials, which I don't have. This build uses the same JWT-token auth model Supabase Auth uses internally, and a SQLAlchemy database layer that runs on local SQLite today and points at a real Supabase Postgres connection string with a one-line `.env` change — no code changes. See "Going Fully Cloud" below for exactly what to do when you have your own Supabase/Render/Vercel accounts.
+## Screenshots
 
-## What changed vs. the Option A (Flask/SQLite) build
-| | Option A | Option B (this) |
-|---|---|---|
-| Backend framework | Flask | **FastAPI** |
-| ORM | raw SQL | **SQLAlchemy** (Postgres-ready) |
-| Frontend | plain HTML/JS | **React** (Vite) |
-| Real-time mechanism | polling every 4–6s | **WebSockets** — instant push |
-| Capacity race-condition fix | `BEGIN IMMEDIATE` transaction | **atomic conditional `UPDATE ... WHERE going_count < capacity`** (portable to Postgres) |
-| API docs | manual | **automatic** — FastAPI serves interactive docs at `/docs` |
+> Replace the file names below with your own images in `docs/screenshots/`.
+
+| Organizer dashboard | Live event page |
+|---|---|
+| ![Organizer Dashboard Events](screenshots\Project 5 Image 3 Create Event.png) | ![Live RSVP counts](screenshots\Project 5 Image 5 All Events.png) |
+
+| Waitlist | Live announcement |
+|---|---|
+| ![Waitlist](screenshots\Project 5 Image 4 Attendee Dashboard.png) | ![Announcement](screenshots\Project 5 Image 6 Updated Announcement.png) |
+
+## Features
+
+**Organizer**
+- Register and log in with an organizer role
+- Create, update and cancel events (date, time, venue or online link, maximum capacity, registration deadline)
+- Live dashboard: Going / Maybe / Not Going / Waitlisted counts, seats left and capacity utilization
+- Post announcements that appear instantly on the event page
+- View the attendee list and RSVP growth analytics for their own events
+
+**Attendee**
+- Register and log in with an attendee role
+- Browse upcoming events and view event details
+- RSVP Going, Maybe or Not Going, change the response later, or cancel it
+- See live counts and announcements without refreshing the page
+- Automatically waitlisted when the event is full, and promoted (first come, first served) when a seat opens
+
+**System**
+- Real-time updates over WebSockets with automatic reconnection
+- Race-condition-safe capacity control
+- Role-based access control, token authentication, rate limiting
+- In-app notifications for RSVP confirmation, waitlist promotion, announcements and cancellations
+- Automatic interactive API documentation
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite, React Router |
+| Backend | Python, FastAPI, Uvicorn |
+| Database | SQLAlchemy ORM with SQLite (PostgreSQL compatible) |
+| Real-time | WebSockets |
+| Authentication | Signed expiring tokens (JWT style), PBKDF2 password hashing |
+| Testing | pytest, FastAPI TestClient |
 
 ## Architecture
+
 ```
-React (Vite, port 5173) ──HTTP──▶ FastAPI (port 8000) ──▶ SQLAlchemy ──▶ SQLite (dev) / Postgres-Supabase (prod)
-                         ──WS───▶ /ws/events/{id}  (live RSVP counts + announcements, pushed instantly)
+React app (browser)
+   |  HTTP (REST)                     ^  WebSocket push
+   v                                  |
+FastAPI  -->  RSVP service  -->  SQLAlchemy  -->  SQLite / PostgreSQL
+   |
+   +-- WebSocket manager: tracks connections per event, broadcasts updates
 ```
 
-## Real-Time: How the WebSocket Push Actually Works
-1. A browser on the event page opens `ws://.../ws/events/{event_id}` (`frontend/src/hooks/useEventSocket.js`).
-2. The server tracks every open connection per event (`backend/app/websocket_manager.py`).
-3. The instant anyone submits/cancels an RSVP, `backend/app/routers/rsvp.py` re-reads the live counts and calls `manager.broadcast(event_id, ...)`.
-4. Every browser watching that event receives the new counts **immediately** — verified in `tests/test_api.py::test_websocket_receives_live_count_update` and by a live smoke test during development (a WebSocket client received the pushed update the moment a separate REST call submitted an RSVP).
-5. The hook auto-reconnects with exponential backoff if the connection drops.
+1. A user clicks **Going**. The browser sends `POST /api/events/{id}/rsvp`.
+2. The RSVP service checks capacity and saves the response in a single database operation.
+3. The server reads the fresh counts and broadcasts them to every browser connected to that event.
+4. All viewers see the new numbers immediately.
 
-This is the direct analogue of a Firestore `onSnapshot()` listener or Supabase Realtime channel — swapping to either later means replacing this one hook and the `websocket_manager.py` broadcast call; nothing else in the app needs to change.
+## How Real-Time Updates Work
 
-## The Concurrency Fix (Option B version)
-Same problem as Option A (two simultaneous "last seat" requests could both pass a `count < capacity` check before either writes), fixed here with an **atomic conditional UPDATE** — a single SQL statement that combines the check and the increment so the database itself serializes it:
+Each event page opens a WebSocket to `/ws/events/{event_id}`. The server keeps the open connections for each event and sends a message whenever an RSVP is created, changed or cancelled, or an announcement is posted. The React hook (`src/hooks/useEventSocket.js`) reconnects automatically with increasing delay if the connection drops. The organizer dashboard covers many events at once, so it refreshes on a short 5-second timer instead.
+
+## Concurrency Control
+
+If capacity is checked and the RSVP is saved in two separate steps, two people clicking at the same moment can both take the last seat. This project combines the check and the update into one atomic statement:
+
 ```sql
-UPDATE events SET going_count = going_count + 1
+UPDATE events
+SET going_count = going_count + 1
 WHERE event_id = :id AND going_count < maximum_capacity
 ```
-If the statement affects 0 rows, that request lost the race and the user is waitlisted instead — with **zero window** for two requests to both "win." This pattern works identically on SQLite (used here) and Postgres/Supabase (used in production) with no code changes. See `backend/app/services/rsvp_service.py` and the 10-thread concurrency test in `backend/tests/test_api.py`.
 
-## Local Setup
+The database processes these one at a time. If one row changes, the user got a seat. If zero rows change, the event was full and the user is waitlisted. A test starts 10 threads competing for a single seat and confirms exactly one gets **Going** and nine are waitlisted.
 
-### Backend
+## Database Schema
+
+| Table | Purpose |
+|---|---|
+| `users` | Accounts with role: organizer, attendee or admin |
+| `events` | Event details, `maximum_capacity`, `going_count`, status |
+| `rsvps` | One RSVP per user per event (unique constraint) |
+| `waitlist` | Ordered queue of waiting attendees |
+| `announcements` | Organizer messages per event |
+| `notifications` | In-app notifications per user |
+
+## Roles and Permissions
+
+| Action | Attendee | Organizer | Admin |
+|---|:---:|:---:|:---:|
+| Register, log in, browse events | Yes | Yes | Yes |
+| RSVP, update or cancel own RSVP | Yes | Yes | Yes |
+| Create an event | No | Yes | Yes |
+| Edit or cancel an event | No | Own events | Any |
+| View attendee list and analytics | No | Own events | Any |
+| Post announcements | No | Own events | Any |
+
+## API Overview
+
+Interactive documentation is available at `http://localhost:8000/docs` while the backend runs.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/register` | Create an account |
+| POST | `/api/login` | Log in and receive a token |
+| POST | `/api/events` | Create an event (organizer) |
+| GET | `/api/events` | List events (`?upcoming=true` for future events) |
+| GET | `/api/events/{id}` | Event details |
+| GET | `/api/events/{id}/counts` | Public live counts (no personal data) |
+| PUT / DELETE | `/api/events/{id}` | Update / cancel an event (owner) |
+| POST / DELETE | `/api/events/{id}/rsvp` | Create or update / cancel own RSVP |
+| GET | `/api/events/{id}/rsvps` | Attendee list (owner) |
+| GET | `/api/rsvps/me` | Current user's RSVPs |
+| GET | `/api/events/{id}/analytics` | Analytics (owner) |
+| POST / GET | `/api/events/{id}/announcements` | Post (owner) / read announcements |
+| GET | `/api/notifications` | Current user's notifications |
+| PUT | `/api/notifications/{id}/read` | Mark a notification as read |
+| WS | `/ws/events/{id}` | Live counts and announcements |
+
+Errors return JSON with an appropriate status code: 400, 401, 403, 404, 409, 429 or 500.
+
+## Getting Started
+
+### Prerequisites
+- Python 3.10 or newer
+- Node.js 18 or newer
+
+### 1. Backend
+
 ```bash
 cd backend
 python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+venv\Scripts\activate          # macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env            # edit SECRET_KEY at minimum
-uvicorn app.main:app --reload --port 8000
+copy .env.example .env         # macOS/Linux: cp .env.example .env
+python -m uvicorn app.main:app --reload --port 8000
 ```
-- API docs (auto-generated): `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/api/health`
 
-### Frontend
+Backend: `http://localhost:8000`, API docs: `http://localhost:8000/docs`
+
+### 2. Frontend
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-Open `http://localhost:5173`. Vite's dev proxy (`vite.config.js`) forwards `/api` and `/ws` to the backend on port 8000 automatically — no CORS setup needed locally.
 
-### Run Tests
+Open `http://localhost:5173`. The Vite dev server forwards `/api` and `/ws` to the backend, so no extra configuration is needed locally.
+
+### 3. Try it
+
+1. Register an **Organizer** and create an event with capacity 2 and a future date.
+2. In a second browser or an incognito window, register an **Attendee** and open the event.
+3. Click **Going** and watch the counts change live in both windows.
+4. Register more attendees until the event is full. The next one is waitlisted.
+5. Cancel a "Going" RSVP and the first waitlisted attendee is promoted automatically.
+6. As the organizer, post an announcement and watch it appear on the open event page.
+
+## Configuration
+
+Copy `backend/.env.example` to `backend/.env`.
+
+| Variable | Description | Default |
+|---|---|---|
+| `SECRET_KEY` | Secret used to sign tokens. Set a long random value. | dev value |
+| `TOKEN_TTL_SECONDS` | Token lifetime | `86400` |
+| `DATABASE_URL` | Database connection string | `sqlite:///./event_rsvp.db` |
+| `CORS_ORIGIN` | Allowed frontend origin | `*` |
+| `RATE_LIMIT_PER_MINUTE` | Requests per minute per IP | `120` |
+
+To use PostgreSQL, install a driver (`pip install psycopg2-binary`) and set `DATABASE_URL=postgresql://user:password@host:5432/dbname`. When the frontend is hosted separately from the backend, set `VITE_API_BASE` and `VITE_WS_BASE` in `frontend/.env` (see `frontend/.env.example`). Never commit real secrets. `.env` is listed in `.gitignore`.
+
+## Testing
+
 ```bash
 cd backend
-pytest -v
+python -m pytest -v
 ```
-24 tests, including the multi-threaded concurrency test and a real WebSocket push test. All pass as of this build.
 
-## Going Fully Cloud (when you have your own accounts)
-1. **Database → Supabase Postgres:** create a Supabase project, copy its Postgres connection string, set `DATABASE_URL=postgresql://...` in `backend/.env`. Nothing else changes — `database.py` and every model already target the ORM, not raw SQLite SQL.
-2. **Auth → Supabase Auth (optional):** replace `issue_token`/`verify_token`/`get_current_user` in `backend/app/security.py` with calls to Supabase's Python client (`supabase-py`); every route already depends on `get_current_user`, so route code doesn't change.
-3. **Backend hosting:** deploy `backend/` to Render, Railway, or Fly.io (all have free tiers and support long-lived WebSocket connections — confirm your host's plan supports WebSockets before picking one). Set `DATABASE_URL`, `SECRET_KEY`, `CORS_ORIGIN` as environment variables there.
-4. **Frontend hosting:** deploy `frontend/` to Vercel or Netlify. Set `VITE_API_BASE` and `VITE_WS_BASE` (see `frontend/.env.example`) to your deployed backend's URL.
-5. **Real-time upgrade (optional):** swap the custom WebSocket hook for Supabase Realtime's Postgres change-subscription, which pushes on any DB row change without your backend needing to call `broadcast()` explicitly.
+The 24 automated tests cover registration and login, duplicate accounts, role restrictions, event creation and access control, RSVP create / update / cancel, duplicate-RSVP prevention, registration deadline, capacity and waitlist, waitlist promotion, announcements, notifications, analytics, invalid tokens, the 10-thread race-condition test, and a WebSocket test that confirms live counts are pushed after an RSVP.
 
-## Folder Structure
+## Security
+
+- Passwords are hashed with PBKDF2-HMAC-SHA256 and never stored in plain text
+- Signed tokens that expire; tampered or expired tokens are rejected
+- Role checks are enforced on the server for every protected action
+- Organizers can only modify or view data for their own events
+- Generic login error message so registered emails are not revealed
+- Per-IP rate limiting (HTTP 429)
+- Secrets come from environment variables, not source code
+- Unexpected errors return a generic message; details are only logged on the server
+
+## Project Structure
+
 ```
-optionB/
+.
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            FastAPI app, CORS, rate limiting, error handling
-│   │   ├── database.py        SQLAlchemy engine (SQLite dev / Postgres prod)
-│   │   ├── models.py          ORM models
-│   │   ├── schemas.py         Pydantic request/response validation
-│   │   ├── security.py        JWT auth + RBAC dependencies
-│   │   ├── websocket_manager.py   Real-time connection tracking + broadcast
-│   │   ├── routers/           auth, events, rsvp (+ WebSocket route), announcements, notifications, analytics
-│   │   └── services/          rsvp_service.py (the concurrency-safe core), analytics_service.py
-│   ├── tests/test_api.py      24 automated tests incl. concurrency + WebSocket
+│   │   ├── main.py                 FastAPI app, CORS, rate limiting, error handling
+│   │   ├── database.py             Database engine and session
+│   │   ├── models.py               ORM models
+│   │   ├── schemas.py              Request / response validation
+│   │   ├── security.py             Tokens, password hashing, role checks
+│   │   ├── websocket_manager.py    Connection tracking and broadcasts
+│   │   ├── routers/                auth, events, rsvp, announcements, notifications, analytics
+│   │   └── services/               rsvp_service.py, analytics_service.py
+│   ├── tests/test_api.py
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/             Home, Login, Register, OrganizerDashboard, AttendeeDashboard, EventDetail
-│   │   ├── hooks/useEventSocket.js   the real-time WebSocket hook
+│   │   ├── pages/                  Home, Login, Register, dashboards, EventDetail
+│   │   ├── hooks/useEventSocket.js
 │   │   └── api.js
-│   ├── vite.config.js
 │   ├── package.json
-│   └── .env.example
+│   └── vite.config.js
+├── docs/screenshots/
 └── README.md
 ```
 
-## Everything Else (security, RBAC, scalability, failure handling, etc.)
-Carries over unchanged in substance from the Option A README — same roles/permissions table, same security posture (hashed passwords, RBAC on every mutating route, generic error messages, no hardcoded secrets), same scalability discussion. The delta specific to this build is documented above.
+## Limitations
+
+- No email or SMS notifications; notifications are stored in the database and available through the API
+- The frontend has no notifications page or event-edit screen yet (both are supported by the API)
+- No attendee invitation links; events are open to any registered attendee
+- WebSocket broadcasting runs inside a single server process; running several instances would need a shared message layer such as Redis
+
+## Future Improvements
+
+- Deploy the backend, frontend and PostgreSQL database to a cloud provider
+- Managed authentication (Supabase Auth or Firebase Auth)
+- Email notifications, QR-code check-in and calendar (`.ics`) export
+- Invitation links with tokens
+- Redis pub/sub for multi-instance real-time updates
+- CI with GitHub Actions to run tests on every push
 
 ## Author
-Shikha — MCA Student, Chitkara University
+
+**Shikha** - MCA, Chitkara University

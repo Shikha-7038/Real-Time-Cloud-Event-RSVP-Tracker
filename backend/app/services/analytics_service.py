@@ -21,7 +21,7 @@ def get_event_analytics(db: Session, event_id: str):
     going = status_counts["GOING"]
 
     growth_rows = (
-        db.query(func.substr(RSVP.responded_at, 1, 10).label("day"), func.count(RSVP.rsvp_id))
+        db.query(func.date(RSVP.responded_at).label("day"), func.count(RSVP.rsvp_id))
         .filter(RSVP.event_id == event_id)
         .group_by("day")
         .order_by("day")
