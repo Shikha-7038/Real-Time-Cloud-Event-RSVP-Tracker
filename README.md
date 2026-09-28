@@ -2,18 +2,6 @@
 
 A web application where organizers create events and attendees RSVP as **Going**, **Maybe** or **Not Going**. RSVP counts update **instantly in every open browser** through WebSockets, event capacity is enforced even under simultaneous requests, and overflow attendees are placed on an automatic waitlist.
 
-## Screenshots
-
-> Replace the file names below with your own images in `docs/screenshots/`.
-
-| Organizer dashboard | Live event page |
-|---|---|
-| ![Organizer Dashboard Events](screenshots\Project 5 Image 3 Create Event.png) | ![Live RSVP counts](screenshots\Project 5 Image 5 All Events.png) |
-
-| Waitlist | Live announcement |
-|---|---|
-| ![Waitlist](screenshots\Project 5 Image 4 Attendee Dashboard.png) | ![Announcement](screenshots\Project 5 Image 6 Updated Announcement.png) |
-
 ## Features
 
 **Organizer**
