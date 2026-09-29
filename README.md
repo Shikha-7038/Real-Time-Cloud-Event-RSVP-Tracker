@@ -2,6 +2,14 @@
 
 A web application where organizers create events and attendees RSVP as **Going**, **Maybe** or **Not Going**. RSVP counts update **instantly in every open browser** through WebSockets, event capacity is enforced even under simultaneous requests, and overflow attendees are placed on an automatic waitlist.
 
+## Live Demo
+
+- **Frontend (Vercel):** https://real-time-cloud-event-rsvp-tracker.vercel.app
+- **Backend API docs (Render):** https://real-time-cloud-event-rsvp-tracker-ipdt.onrender.com/docs
+
+> The backend runs on a free plan and sleeps after about 15 minutes without visitors. The first request can take up to a minute to wake it up.
+
+
 ## Features
 
 **Organizer**
@@ -46,6 +54,8 @@ FastAPI  -->  RSVP service  -->  SQLAlchemy  -->  SQLite / PostgreSQL
    |
    +-- WebSocket manager: tracks connections per event, broadcasts updates
 ```
+
+**Hosting:** React frontend on Vercel, FastAPI backend on Render, PostgreSQL database on Supabase.
 
 1. A user clicks **Going**. The browser sends `POST /api/events/{id}/rsvp`.
 2. The RSVP service checks capacity and saves the response in a single database operation.
@@ -166,6 +176,16 @@ Copy `backend/.env.example` to `backend/.env`.
 
 To use PostgreSQL, install a driver (`pip install psycopg2-binary`) and set `DATABASE_URL=postgresql://user:password@host:5432/dbname`. When the frontend is hosted separately from the backend, set `VITE_API_BASE` and `VITE_WS_BASE` in `frontend/.env` (see `frontend/.env.example`). Never commit real secrets. `.env` is listed in `.gitignore`.
 
+## Deployment
+
+| Part | Service | Key settings |
+|---|---|---|
+| Database | Supabase (PostgreSQL) | Session pooler connection string (IPv4 compatible) |
+| Backend | Render web service | Root directory `backend`; start command `uvicorn app.main:app --host 0.0.0.0 --port $PORT`; variables `DATABASE_URL`, `SECRET_KEY`, `CORS_ORIGIN`, `RATE_LIMIT_PER_MINUTE`, `PYTHON_VERSION` |
+| Frontend | Vercel | Root directory `frontend`; variables `VITE_API_BASE`, `VITE_WS_BASE` (use `wss://` for the WebSocket URL); `vercel.json` rewrites all routes to `index.html` |
+
+Database tables are created automatically when the backend starts. Pushing to the `main` branch on GitHub redeploys the backend and frontend automatically.
+
 ## Testing
 
 ```bash
@@ -216,6 +236,7 @@ The 24 automated tests cover registration and login, duplicate accounts, role re
 
 ## Limitations
 
+- The free hosting plan puts the backend to sleep when idle, so the first request after a pause is slow
 - No email or SMS notifications; notifications are stored in the database and available through the API
 - The frontend has no notifications page or event-edit screen yet (both are supported by the API)
 - No attendee invitation links; events are open to any registered attendee
@@ -223,8 +244,7 @@ The 24 automated tests cover registration and login, duplicate accounts, role re
 
 ## Future Improvements
 
-- Deploy the backend, frontend and PostgreSQL database to a cloud provider
-- Managed authentication (Supabase Auth or Firebase Auth)
+- Managed authentication (Supabase Auth or Firebase Auth) in place of the built-in token login
 - Email notifications, QR-code check-in and calendar (`.ics`) export
 - Invitation links with tokens
 - Redis pub/sub for multi-instance real-time updates
